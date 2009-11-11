@@ -9,6 +9,7 @@ import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.ProcessingEnvironment;
 import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
+import javax.annotation.processing.SupportedOptions;
 import javax.annotation.processing.SupportedSourceVersion;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
@@ -29,6 +30,7 @@ import com.sun.tools.javac.util.List;
  * The main entry point for the immuting processor.
  */
 @SupportedAnnotationTypes("*")
+@SupportedOptions({ Processor.HANDLE_STAR })
 @SupportedSourceVersion(SourceVersion.RELEASE_6)
 public class Processor extends AbstractProcessor
 {
@@ -46,6 +48,9 @@ public class Processor extends AbstractProcessor
         Context ctx = ((JavacProcessingEnvironment)procenv).getContext();
         _trees = Trees.instance(procenv);
         _procenv = procenv;
+
+        // note our options
+        _handleStar = "true".equalsIgnoreCase(procenv.getOptions().get(HANDLE_STAR));
 
 //         procenv.getMessager().printMessage(
 //             Diagnostic.Kind.NOTE, "Immuter running [vers=" + procenv.getSourceVersion() + "]");
@@ -89,7 +94,7 @@ public class Processor extends AbstractProcessor
 
         // TODO: it would be nice if we could say that we handled @var but there seems to be no way
         // to say you accept "*" but then tell javac you handled some of the annotations you saw
-        return false;
+        return _handleStar;
     }
 
     protected JCCompilationUnit toUnit (Element element)
@@ -112,4 +117,7 @@ public class Processor extends AbstractProcessor
 
     protected ProcessingEnvironment _procenv;
     protected Trees _trees;
+    protected boolean _handleStar;
+
+    protected static final String HANDLE_STAR = "org.immutablej.handle_star";
 }
