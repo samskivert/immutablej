@@ -116,6 +116,7 @@
       <!--<compilerarg value="-XprintProcessorInfo"/>-->
       <compilerarg value="-processor"/>
       <compilerarg value="org.immutablej.immuter.Processor"/>
+      <compilerarg value="-Aorg.immutablej.handle_star=true"/>
       <include name="**/tests/${test}*.java"/>
     </javac>
 
