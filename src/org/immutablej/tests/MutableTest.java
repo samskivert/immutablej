@@ -33,6 +33,10 @@ public class MutableTest
 
         // _one = 1; // illegal!
         _two = 2; // legal
+
+        for (@var int ii = 0; ii < 10; ii++) {
+            bar = ii;
+        }
     }
 
     protected void testArgs (int one, @var int two)
