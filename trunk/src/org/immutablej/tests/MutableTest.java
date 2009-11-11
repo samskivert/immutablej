@@ -30,6 +30,9 @@ public class MutableTest
                 // assertEquals(bar, 2); // illegal!
             }
         }.run();
+
+        // _one = 1; // illegal!
+        _two = 2; // legal
     }
 
     protected void testArgs (int one, @var int two)
@@ -37,4 +40,7 @@ public class MutableTest
         // one = 2; // illegal!
         two = 3;
     }
+
+    protected int _one = 0;
+    protected @var int _two;
 }

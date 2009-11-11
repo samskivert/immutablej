@@ -28,7 +28,7 @@ import com.sun.tools.javac.util.List;
 /**
  * The main entry point for the elbatum processor.
  */
-@SupportedAnnotationTypes("com.samskivert.elbatum.var")
+@SupportedAnnotationTypes("*")
 @SupportedSourceVersion(SourceVersion.RELEASE_6)
 public class Processor extends AbstractProcessor
 {
@@ -39,14 +39,16 @@ public class Processor extends AbstractProcessor
 
         if (!(procenv instanceof JavacProcessingEnvironment)) {
             procenv.getMessager().printMessage(
-                Diagnostic.Kind.WARNING, "Detyper requires javac v1.6.");
+                Diagnostic.Kind.WARNING, "Immuter requires javac v1.6.");
             return;
         }
 
         Context ctx = ((JavacProcessingEnvironment)procenv).getContext();
         _trees = Trees.instance(procenv);
+        _procenv = procenv;
 
-        System.err.println("Elbatum running [vers=" + procenv.getSourceVersion() + "]");
+//         procenv.getMessager().printMessage(
+//             Diagnostic.Kind.NOTE, "Immuter running [vers=" + procenv.getSourceVersion() + "]");
     }
 
     @Override // from AbstractProcessor
@@ -57,7 +59,7 @@ public class Processor extends AbstractProcessor
         }
 
         for (Element elem : roundEnv.getRootElements()) {
-            JCCompilationUnit unit = toUnit(elem);
+            final JCCompilationUnit unit = toUnit(elem);
 
             unit.accept(new TreeTranslator() {
                 public void visitVarDef (JCVariableDecl tree) {
@@ -65,19 +67,29 @@ public class Processor extends AbstractProcessor
 
                     // note the number of annotations on this var
                     int ocount = tree.mods.annotations.size();
+
                     // remove the @var annotation if we see it
                     tree.mods.annotations = removeVar(tree.mods.annotations);
+
                     // if we didn't remove anything, then make the variable final
                     if (tree.mods.annotations.size() == ocount) {
                         tree.mods.flags |= Flags.FINAL;
+
+                    // check for retardation
+                    } else if ((tree.mods.flags & Flags.FINAL) != 0) {
+                        _procenv.getMessager().printMessage(
+                            Diagnostic.Kind.WARNING,
+                            "@var annotated variable also marked final: " + tree,
+                            // TODO: this should work but it doesn't, sigh
+                            _trees.getElement(TreePath.getPath(unit, tree)));
                     }
                 }
             });
-
-//             RT.debug("Root elem " + elem, "unit", unit.getClass().getSimpleName(),
-//                      "sym.mems", ASTUtil.expand(unit.packge.members_field.elems.sym));
         }
-        return true;
+
+        // TODO: it would be nice if we could say that we handled @var but there seems to be no way
+        // to say you accept "*" but then tell javac you handled some of the annotations you saw
+        return false;
     }
 
     protected JCCompilationUnit toUnit (Element element)
@@ -98,5 +110,6 @@ public class Processor extends AbstractProcessor
         }
     }
 
+    protected ProcessingEnvironment _procenv;
     protected Trees _trees;
 }
