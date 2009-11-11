@@ -1,10 +1,5 @@
 <?xml version="1.0"?>
 <project name="immuter" default="compile" basedir=".">
-  <!-- project metadata -->
-  <property name="lib.name"     value="immuter"/>
-  <property name="doc.packages" value="org.immutablej.immuter.*"/>
-  <property name="doc.overview" value="org/immutablej/immuter/overview.html"/>
-
   <!-- various directories used when building things -->
   <property name="src.dir"     value="src"/>
   <property name="deploy.dir"  value="dist"/>
@@ -71,8 +66,8 @@
 
   <!-- builds the javadoc documentation -->
   <target name="javadoc" depends="prepare" description="Generates javadoc documentation.">
-    <javadoc windowtitle="${lib.name} API" doctitle="${lib.name} API"
-             overview="${src.dir}/${doc.overview}" destdir="${javadoc.dir}"
+    <javadoc windowtitle="ImmutableJ API" doctitle="ImmutableJ API"
+             overview="${src.dir}/org/immutablej/overview.html" destdir="${javadoc.dir}"
              additionalparam="-breakiterator">
       <packageset dir="${src.dir}">
         <exclude name="org/immutablej/immuter/tests/**"/>
@@ -89,10 +84,17 @@
   <!-- builds our distribution jar file -->
   <target name="dist" depends="prepare,compile"
           description="Compiles the code and builds our jar file.">
-    <jar destfile="${deploy.dir}/${lib.name}.jar" basedir="${classes.dir}">
+    <jar destfile="${deploy.dir}/immuter.jar" basedir="${classes.dir}">
       <service type="javax.annotation.processing.Processor"
                provider="org.immutablej.immuter.Processor"/>
       <exclude name="**/tests/**"/>
+      <exclude name="**/imferrer/**"/>
+    </jar>
+    <jar destfile="${deploy.dir}/imferrer.jar" basedir="${classes.dir}">
+      <service type="javax.annotation.processing.Processor"
+               provider="org.immutablej.imferrer.Processor"/>
+      <exclude name="**/tests/**"/>
+      <exclude name="**/immuter/**"/>
     </jar>
   </target>
 
