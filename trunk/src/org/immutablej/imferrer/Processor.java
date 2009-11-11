@@ -60,7 +60,8 @@ public class Processor extends AbstractProcessor
         for (Element elem : roundEnv.getRootElements()) {
             _imfer.imfer(toUnit(elem));
         }
-        return false;
+        return true; // we won't be run in conjunction with other annotation processors so we can
+                     // safely claim to have handled everything
     }
 
     protected JCCompilationUnit toUnit (Element element)

@@ -3,8 +3,13 @@
 
 package org.immutablej.imferrer;
 
-import java.util.Set;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.StringWriter;
 import java.util.HashSet;
+import java.util.Set;
 
 import com.sun.tools.javac.code.Flags;
 import com.sun.tools.javac.code.Kinds;
@@ -17,6 +22,7 @@ import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.TreeInfo;
 import com.sun.tools.javac.tree.TreeScanner;
 import com.sun.tools.javac.util.Context;
+import com.sun.tools.javac.util.List;
 import com.sun.tools.javac.util.Name;
 
 /**
@@ -41,24 +47,101 @@ public class Imfer extends TreeScanner
      */
     public void imfer (JCCompilationUnit tree)
     {
+        // in theory this shouldn't happen, but it's possible that we'll get run on dependent
+        // classes loaded from librarys; in that case we'll want to nix the below warning
+        if (tree.sourcefile == null) {
+            System.err.println("Skipping compilation unit for which we lack source: " + tree);
+            return;
+        }
+
+        // this is a bit of a hack but there's no other good way to get our hands on the path to
+        // the original source file
+        File file = new File(tree.sourcefile.toString());
+        if (!file.exists()) {
+            System.err.println("Skipping compilation unit with strange sourcefile: " +
+                               tree.sourcefile);
+            return;
+        }
+
+        System.out.println("*** Processing " + tree.sourcefile);
         Env<ImferContext> oenv = _env;
         try {
             _env = new Env<ImferContext>(tree, new ImferContext());
             _env.toplevel = tree;
             _env.info.scope = tree.namedImportScope;
+
+            // do our mutability inference
             tree.accept(this);
+
+            // now add @var to all inferred mutable symbols
+            Patcher patcher = new Patcher();
+            int varsAdded = 0;
+            Set<JCModifiers> seen = new HashSet<JCModifiers>();
+            for (Symbol sym : _env.info.mutable) {
+                JCVariableDecl decl = _env.info.symToDecl.get(sym);
+                if (decl == null) {
+                    System.err.println("Yikes! Missing declaration for symbol " + sym);
+                    continue;
+                }
+                // avoid adding @var to source that already had @var and avoid repeatedly adding it
+                // for variables that share modifiers (i.e. @var int foo = 1, bar = 2, baz = 0)
+                if (!haveVarAnnotation(decl.mods.annotations) && !seen.contains(decl.mods)) {
+                    seen.add(decl.mods);
+                    System.err.println("Adding @var to " + decl);
+                    patcher.insert(TreeInfo.getStartPos(decl.vartype), "@var ");
+                    varsAdded++;
+                }
+                // TODO: if this decl contains a needless final modifier, remove it
+            }
+
+            // if we added @var annotations, make sure it's imported
+            if (varsAdded > 0 && !haveVarImport(tree)) {
+                String text = "import " + FQ_ANNOTATION + ";\n";
+                int fpos = findFirstImportPos(tree);
+                // if we found no imports then put our import after the package declaration
+                if (fpos == Integer.MAX_VALUE) {
+                    fpos = TreeInfo.getStartPos(tree.pid) + tree.pid.toString().length() +
+                        1 /* semicolon: this will break if they have whitespace between the package
+                           * name and the semicolon... sigh  */ +
+                        System.getProperty("line.separator").length();
+                    text = "\n" + text;
+                } else {
+                    text = text + "\n";
+                }
+                patcher.insert(fpos, text);
+            }
+
+            try {
+                StringWriter temp = new StringWriter();
+                patcher.apply(file, temp);
+                FileWriter output = new FileWriter(file);
+                output.write(temp.toString());
+                output.close();
+            } catch (IOException ioe) {
+                System.err.println("Failed to patch original source [file=" + file + "].");
+                ioe.printStackTrace(System.err);
+            }
+
         } finally {
             _env = oenv;
         }
     }
 
     @Override public void visitClassDef (JCClassDecl tree) {
-        System.err.println("Entering class '" + tree.name + "'");
+        System.err.println("Entering class '" + tree.name + "' (" + tree.sym + ")");
 
         // if we're visiting an anonymous inner class, we have to create a bogus scope as javac
         // does not Enter anonymous inner classes during the normal Enter phase
-        Scope nscope = (tree.sym != null) ? tree.sym.members_field.dupUnshared() :
-            new Scope(new ClassSymbol(0, tree.name, _env.enclMethod.sym));
+        Scope nscope;
+        if (tree.sym == null || tree.sym.members_field == null) {
+            if (_env.enclMethod != null) {
+                nscope = new Scope(new ClassSymbol(0, tree.name, _env.enclMethod.sym));
+            } else {
+                nscope = new Scope(new ClassSymbol(0, tree.name, _env.enclClass.sym));
+            }
+        } else {
+            nscope = tree.sym.members_field.dupUnshared();
+        }
 
         // note the environment of the class we're processing
         Env<ImferContext> oenv = _env;
@@ -70,7 +153,7 @@ public class Imfer extends TreeScanner
     }
 
     @Override public void visitMethodDef (JCMethodDecl tree) {
-        System.out.println("Entering method: " + tree);
+        System.out.println("Entering method '" + tree.name + "'");
 
         // create a local environment for this method definition
         Env<ImferContext> oenv = _env;
@@ -88,24 +171,36 @@ public class Imfer extends TreeScanner
     @Override public void visitVarDef (JCVariableDecl tree) {
         super.visitVarDef(tree);
 
-        // var symbols for member-level variables are already entered, we just want to handle
-        // formal parameters and local variable declarations
+        // symbols for member-level variables and formal parameters are already created, we need to
+        // create symbols for local variable declarations
         VarSymbol sym = tree.sym;
         if (sym == null) {
             // create a symbol for this variable which we'll use later to determine where we need
             // to insert @var
             sym = new VarSymbol(0, tree.name, null, _env.info.scope.owner);
             sym.pos = tree.pos;
-            _env.info.scope.enter(sym);
-            System.out.println("Created var sym " + sym);
         }
 
-        // TODO: if this vardef includes a final modifier (and it's not a public or protected
-        // member), schedule it for removal
+        // if we're inside a method, we need to enter all encountered symbols into scope
+        if (_env.enclMethod != null) {
+            _env.info.scope.enter(sym);
+        }
+
+        // no matter where we are, we need to update our mapping from symbol to AST node
+        _env.info.symToDecl.put(sym, tree);
+
+        // if this is a public or protected class member, we need to mark it mutable (unless it's
+        // already marked final) because we can't know determine if it's ever mutated
+        if (isNonPrivateMember(sym) && (sym.flags() & Flags.FINAL) == 0) {
+            System.out.println("Need to make non-private member mutable " + sym);
+            _env.info.mutable.add(sym);
+        }
     }
 
     @Override public void visitUnary (JCUnary tree) {
         super.visitUnary(tree);
+
+        System.out.println("Look ma, unop " + tree);
 
         // ++ and friends mutate
         if (UNOPS.contains(tree.tag) /* getTag() in 1.7 */ ) {
@@ -113,17 +208,19 @@ public class Imfer extends TreeScanner
         }
     }
 
-    @Override public void visitBinary (JCBinary tree) {
-        super.visitBinary(tree);
+    @Override public void visitAssignop (JCAssignOp tree) {
+        super.visitAssignop(tree);
 
-        // += and friends mutate their lhs
-        if (BINOPS.contains(tree.tag) /* getTag() in 1.7 */ ) {
-            noteMutable(tree.lhs);
-        }
+        System.out.println("Look ma, assignop " + tree);
+
+        // op= mutates its lhs
+        noteMutable(tree.lhs);
     }
 
     @Override public void visitAssign (JCAssign tree) {
         super.visitAssign(tree);
+
+        System.out.println("Look ma, assign " + tree);
 
         // = mutates its lhs
         noteMutable(tree.lhs);
@@ -146,6 +243,7 @@ public class Imfer extends TreeScanner
                 System.err.println("Can't do anything with non-private member. " + tree);
             } else {
                 System.err.println("Mark this var as mutable! " + tree);
+                _env.info.mutable.add(vsym);
             }
         }
     }
@@ -209,6 +307,40 @@ public class Imfer extends TreeScanner
         return null;
     }
 
+    protected static boolean haveVarAnnotation (List<JCAnnotation> anns)
+    {
+        if (anns.isEmpty()) {
+            return false;
+        } else {
+            return anns.head.annotationType.toString().equals("var") ||
+                haveVarAnnotation(anns.tail);
+        }
+    }
+
+    protected static boolean haveVarImport (JCCompilationUnit tree)
+    {
+        final boolean[] found = new boolean[1];
+        tree.accept(new TreeScanner() {
+            public void visitImport (JCImport tree) {
+                if (!tree.staticImport && tree.qualid.toString().equals(FQ_ANNOTATION)) {
+                    found[0] = true;
+                }
+            }
+        });
+        return found[0];
+    }
+
+    protected static int findFirstImportPos (JCCompilationUnit tree)
+    {
+        final int[] pos = new int[] { Integer.MAX_VALUE };
+        tree.accept(new TreeScanner() {
+            public void visitImport (JCImport tree) {
+                pos[0] = Math.min(TreeInfo.getStartPos(tree), pos[0]);
+            }
+        });
+        return pos[0];
+    }
+
     protected Env<ImferContext> _env;
 
     /** The set of all mutating unary operators. */
@@ -220,21 +352,7 @@ public class Imfer extends TreeScanner
         UNOPS.add(JCTree.POSTDEC); // v--
     }
 
-    /** The set of binary operators that mutate their lhs. */
-    protected static final Set<Integer> BINOPS = new HashSet<Integer>();
-    static {
-        BINOPS.add(JCTree.BITOR_ASG);  // |=
-        BINOPS.add(JCTree.BITXOR_ASG); // ^=
-        BINOPS.add(JCTree.BITAND_ASG); // &=
-        BINOPS.add(JCTree.SL_ASG);     // <<=
-        BINOPS.add(JCTree.SR_ASG);     // >>=
-        BINOPS.add(JCTree.USR_ASG);    // >>>=
-        BINOPS.add(JCTree.PLUS_ASG);   // +=
-        BINOPS.add(JCTree.MINUS_ASG);  // -=
-        BINOPS.add(JCTree.MUL_ASG);    // *=
-        BINOPS.add(JCTree.DIV_ASG);    // /=
-        BINOPS.add(JCTree.MOD_ASG);    // %=
-    }
-
     protected static final Context.Key<Imfer> IMFER_KEY = new Context.Key<Imfer>();
+
+    protected static final String FQ_ANNOTATION = "org.immutablej.var";
 }

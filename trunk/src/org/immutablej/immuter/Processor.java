@@ -4,6 +4,7 @@
 package org.immutablej.immuter;
 
 import java.util.Set;
+import java.util.HashSet;
 
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.ProcessingEnvironment;
@@ -15,6 +16,7 @@ import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.TypeElement;
 import javax.tools.Diagnostic;
+import javax.tools.JavaFileObject;
 
 import com.sun.source.util.TreePath;
 import com.sun.source.util.Trees;
@@ -52,8 +54,8 @@ public class Processor extends AbstractProcessor
         // note our options
         _handleStar = "true".equalsIgnoreCase(procenv.getOptions().get(HANDLE_STAR));
 
-//         procenv.getMessager().printMessage(
-//             Diagnostic.Kind.NOTE, "Immuter running [vers=" + procenv.getSourceVersion() + "]");
+        procenv.getMessager().printMessage(
+            Diagnostic.Kind.NOTE, "Immuter running [vers=" + procenv.getSourceVersion() + "]");
     }
 
     @Override // from AbstractProcessor
@@ -66,9 +68,25 @@ public class Processor extends AbstractProcessor
         for (Element elem : roundEnv.getRootElements()) {
             final JCCompilationUnit unit = toUnit(elem);
 
+            // we only want to operate on files being compiled from source; if they're already
+            // classfiles then we've already run or we're looking at a library class
+            if (unit.sourcefile.getKind() != JavaFileObject.Kind.SOURCE) {
+                System.err.println("Skipping non-source-file " + unit.sourcefile);
+                continue;
+            }
+
+            System.err.println("Processing " + unit.sourcefile);
             unit.accept(new TreeTranslator() {
                 public void visitVarDef (JCVariableDecl tree) {
                     super.visitVarDef(tree);
+
+                    // if this variable declaration's modifiers have already been processed
+                    // (variables can share modifiers, ie. public @var int foo, bar), then don't
+                    // repeat process this declaration
+                    if (_seen.contains(tree.mods)) {
+                        return;
+                    }
+                    _seen.add(tree.mods);
 
                     // note the number of annotations on this var
                     int ocount = tree.mods.annotations.size();
@@ -82,13 +100,15 @@ public class Processor extends AbstractProcessor
 
                     // check for retardation
                     } else if ((tree.mods.flags & Flags.FINAL) != 0) {
-                        _procenv.getMessager().printMessage(
-                            Diagnostic.Kind.WARNING,
-                            "@var annotated variable also marked final: " + tree,
-                            // TODO: this should work but it doesn't, sigh
-                            _trees.getElement(TreePath.getPath(unit, tree)));
+                            _procenv.getMessager().printMessage(
+                                Diagnostic.Kind.WARNING,
+                                "@var annotated variable also marked final: " + tree,
+                                // TODO: this should work but it doesn't, sigh
+                                _trees.getElement(TreePath.getPath(unit, tree)));
                     }
                 }
+
+                protected Set<JCModifiers> _seen = new HashSet<JCModifiers>();
             });
         }
 
