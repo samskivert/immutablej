@@ -1,0 +1,10 @@
+#
+# $Id$
+#
+# Local build configuration
+
+# To build with a locally build langtools javac use the following:
+# javac.home = ../langtools/dist
+# javac.jar = javac.jar
+
+# Leave the above commented out to build using stock javac
