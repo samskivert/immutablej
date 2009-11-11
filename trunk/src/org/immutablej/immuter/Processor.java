@@ -26,7 +26,7 @@ import com.sun.tools.javac.util.Context;
 import com.sun.tools.javac.util.List;
 
 /**
- * The main entry point for the elbatum processor.
+ * The main entry point for the immuting processor.
  */
 @SupportedAnnotationTypes("*")
 @SupportedSourceVersion(SourceVersion.RELEASE_6)
