@@ -63,7 +63,7 @@ public class Imfer extends TreeScanner
             return;
         }
 
-        System.out.println("*** Processing " + tree.sourcefile);
+        // System.out.println("*** Processing " + tree.sourcefile);
         Env<ImferContext> oenv = _env;
         try {
             _env = new Env<ImferContext>(tree, new ImferContext());
@@ -84,14 +84,15 @@ public class Imfer extends TreeScanner
                     continue;
                 }
                 // avoid adding @var to source that already had @var and avoid repeatedly adding it
-                // for variables that share modifiers (i.e. @var int foo = 1, bar = 2, baz = 0)
-                if (!haveVarAnnotation(decl.mods.annotations) && !seen.contains(decl.mods)) {
+                // for variables that share modifiers (i.e. @var int foo = 1, bar = 2, baz = 0),
+                // also don't add @var to a member already declared final
+                if (!haveVarAnnotation(decl.mods.annotations) && !seen.contains(decl.mods) &&
+                    (decl.mods.flags & Flags.FINAL) == 0) {
                     seen.add(decl.mods);
                     // System.err.println("Adding @var to " + decl);
                     patcher.insert(TreeInfo.getStartPos(decl.vartype), "@var ");
                     varsAdded++;
                 }
-                // TODO: if this decl contains a needless final modifier, remove it
             }
 
             // if we added @var annotations, make sure it's imported
@@ -167,6 +168,7 @@ public class Imfer extends TreeScanner
         // note the environment of the class we're processing
         Env<ImferContext> oenv = _env;
         _env = _env.dup(tree, oenv.info.dup(tree.sym.members_field.dupUnshared()));
+        _env.info.cting = null; // don't propagate cting into anon inner classes
         _env.enclClass = tree;
         _env.outer = oenv;
         super.visitClassDef(tree);
@@ -191,6 +193,9 @@ public class Imfer extends TreeScanner
         _env = _env.dup(tree, oenv.info.dup(oenv.info.scope.dupUnshared()));
         _env.enclMethod = tree;
         _env.info.scope.owner = msym;
+        if (msym.isConstructor()) {
+            _env.info.cting = (ClassSymbol)msym.owner;
+        }
 
         // now we can call super and translate our children
         super.visitMethodDef(tree);
@@ -203,13 +208,17 @@ public class Imfer extends TreeScanner
         // create a local environment for this block
         Env<ImferContext> oenv = _env;
         _env = _env.dup(tree, oenv.info.dup(oenv.info.scope.dupUnshared()));
+        // if this is a static block, magick up a fake method to be the owner of this scope so that
+        // variables entered into this scope don't inherit the enclosing class as their owner
+        // because then they end up looking like fields
+        if ((tree.flags & Flags.STATIC) != 0) {
+            _env.info.scope.owner = new MethodSymbol(0, null, null, _env.info.scope.owner);
+        }
         super.visitBlock(tree);
         _env = oenv;
     }
 
     @Override public void visitVarDef (JCVariableDecl tree) {
-        super.visitVarDef(tree);
-
         // symbols for member-level variables and formal parameters are already created, we need to
         // create symbols for local variable declarations
         VarSymbol sym = tree.sym;
@@ -231,9 +240,13 @@ public class Imfer extends TreeScanner
         // if this is a public or protected class member, we need to mark it mutable (unless it's
         // already marked final) because we can't know determine if it's ever mutated
         if (isNonPrivateMember(sym) && (sym.flags() & Flags.FINAL) == 0) {
-            // System.out.println("Need to make non-private member mutable " + sym);
+            // System.out.println("Making non-private member mutable " + sym);
             _env.info.mutable.add(sym);
         }
+
+        // we call super last because doing so may process an assignment expression that references
+        // the very variable we just put into scope, programmers are naughty
+        super.visitVarDef(tree);
     }
 
     @Override public void visitUnary (JCUnary tree) {
@@ -241,7 +254,7 @@ public class Imfer extends TreeScanner
 
         // ++ and friends mutate
         if (UNOPS.contains(tree.tag) /* getTag() in 1.7 */ ) {
-            noteMutable(tree.arg);
+            noteAssign(tree.arg);
         }
     }
 
@@ -249,54 +262,70 @@ public class Imfer extends TreeScanner
         super.visitAssignop(tree);
 
         // op= mutates its lhs
-        noteMutable(tree.lhs);
+        noteAssign(tree.lhs);
     }
 
     @Override public void visitAssign (JCAssign tree) {
         super.visitAssign(tree);
 
         // = mutates its lhs
-        noteMutable(tree.lhs);
+        noteAssign(tree.lhs);
+    }
+
+    @Override public void visitAnnotation (JCAnnotation tree) {
+        // don't call super because annotation expressions contain things like assignments which
+        // can't impact the program runtime and will otherwise just confuse our analysis
     }
 
     protected Imfer (Context ctx)
     {
         ctx.put(IMFER_KEY, this);
-        _names = Name.Table.instance(ctx);
     }
 
-    protected void noteMutable (JCExpression tree)
+    protected void noteAssign (JCExpression tree)
     {
         // if the lhs is an identifier, then we may be mutating an in-scope variable
-        Name vname = getVarName(tree);
-        if (vname != null) {
-            Symbol vsym = findVar(vname);
-            if (vsym == null) {
-                System.err.println("Thought we had a var? " + tree);
-            } else if (isNonPrivateMember(vsym)) {
-                System.err.println("Can't do anything with non-private member. " + tree);
-            } else {
-                // System.err.println("Mark this var as mutable! " + tree);
-                _env.info.mutable.add(vsym);
-            }
-        }
-    }
-
-    protected Name getVarName (JCTree tree)
-    {
         if (tree instanceof JCIdent) {
-            return TreeInfo.name(tree);
+            Name vname = ((JCIdent)tree).name;
+            noteAssigned(tree, findVar(vname));
 
         } else if (tree instanceof JCFieldAccess) {
             // if we're accessing an object member through the this reference, we want to treat
             // that as if we just referenced the member directly
             JCFieldAccess fa = (JCFieldAccess)tree;
             if (fa.selected.toString().equals("this")) {
-                return fa.name;
+                // we need to look the variable up in the scope of the enclosing class, not our
+                // inner scope (which is probably shadowing that name, hence the use of 'this')
+                noteAssigned(tree, lookup(_env.enclClass.sym.members_field, fa.name, Kinds.VAR));
+            } else {
+                // System.err.println("Look ma! Non-local mutation '" + tree + "'.");
             }
-        }
 
-        return null;
+        } else if (tree instanceof JCArrayAccess) {
+            // nothing to do here, array cells are always mutable
+
+        } else {
+            System.err.println("Asked to note mutable on '" + tree + "'?");
+        }
+    }
+
+    protected void noteAssigned (JCExpression tree, Symbol vsym)
+    {
+        if (vsym != null) {
+            // if this symbol is a field in a class whose constructor we're currently
+            // executing, don't count this mutation; this isn't strictly correct, really we
+            // should do flow analysis and see if it's assigned more than once
+            if (_env.info.cting != null && _env.info.cting == vsym.owner) {
+                // System.err.println("Skipping ctor assignment " + vsym);
+            } else {
+                // System.err.println("Mark this var as mutable! " + tree);
+                _env.info.mutable.add(vsym);
+            }
+        } else {
+            // we're almost certainly seeing a parent member which doesn't show up in any
+            // current scope; no problem, we can't infer mutability for such members anyway
+            // System.err.println("Unable to find name in scope? " + tree.pos + " " + tree);
+        }
     }
 
     /**
@@ -381,7 +410,6 @@ public class Imfer extends TreeScanner
     }
 
     protected Env<ImferContext> _env;
-    protected Name.Table _names; // annoyingly this is Names in 1.7
 
     /** The set of all mutating unary operators. */
     protected static final Set<Integer> UNOPS = new HashSet<Integer>();
