@@ -87,7 +87,7 @@ public class Imfer extends TreeScanner
                 // for variables that share modifiers (i.e. @var int foo = 1, bar = 2, baz = 0)
                 if (!haveVarAnnotation(decl.mods.annotations) && !seen.contains(decl.mods)) {
                     seen.add(decl.mods);
-                    System.err.println("Adding @var to " + decl);
+                    // System.err.println("Adding @var to " + decl);
                     patcher.insert(TreeInfo.getStartPos(decl.vartype), "@var ");
                     varsAdded++;
                 }
@@ -128,43 +128,82 @@ public class Imfer extends TreeScanner
     }
 
     @Override public void visitClassDef (JCClassDecl tree) {
-        System.err.println("Entering class '" + tree.name + "' (" + tree.sym + ")");
+        // System.err.println("Entering class '" + tree.name + "' (" + tree.sym + ")");
 
-        // if we're visiting an anonymous inner class, we have to create a bogus scope as javac
+        // if we're visiting an anonymous inner class, we have to create a scope manually; javac
         // does not Enter anonymous inner classes during the normal Enter phase
-        Scope nscope;
-        if (tree.sym == null || tree.sym.members_field == null) {
-            if (_env.enclMethod != null) {
-                nscope = new Scope(new ClassSymbol(0, tree.name, _env.enclMethod.sym));
-            } else {
-                nscope = new Scope(new ClassSymbol(0, tree.name, _env.enclClass.sym));
-            }
-        } else {
-            nscope = tree.sym.members_field.dupUnshared();
+        ClassSymbol csym = null;
+        if (tree.sym == null) {
+            csym  = new ClassSymbol(0, tree.name, getOwner(_env));
+            final Scope nscope = (csym.members_field = new Scope(csym));
+            // note all the variable members of this anonymous inner class in our scope
+            tree.accept(new TreeScanner() {
+                public void visitMethodDef (JCMethodDecl tree) {
+                    // don't call super, we don't want to enter method parameters or local vars
+                }
+                public void visitVarDef (JCVariableDecl tree) {
+                    super.visitVarDef(tree);
+                    // we're in an anonymous inner class, thus there's no way for a field member to
+                    // be visible to code that is not visible to us; this is not toooootally true
+                    // because you can, if you are crazy, write:
+                    //
+                    // new Object() {
+                    //     public int foo;
+                    // }.foo = 15;
+                    //
+                    // and the inferencing code isn't going to properly link that outside foo
+                    // assignment to the anonymous inner class field, but if you do something like
+                    // the above, you deserve fail
+                    VarSymbol sym = new VarSymbol(Flags.PRIVATE, tree.name, null, nscope.owner);
+                    _env.info.symToDecl.put(sym, tree);
+                    nscope.enter(sym);
+                }
+            });
+            // we're going to stick this fake symbol into the tree and we'll have to pull it out
+            // later so that javac doesn't think we mean to do something with it
+            tree.sym = csym;
         }
 
         // note the environment of the class we're processing
         Env<ImferContext> oenv = _env;
-        _env = _env.dup(tree, oenv.info.dup(nscope));
+        _env = _env.dup(tree, oenv.info.dup(tree.sym.members_field.dupUnshared()));
         _env.enclClass = tree;
         _env.outer = oenv;
         super.visitClassDef(tree);
+        if (csym != null) {
+            tree.sym = null; // remove our temporarily created class symbol
+        }
         _env = oenv;
     }
 
     @Override public void visitMethodDef (JCMethodDecl tree) {
-        System.out.println("Entering method '" + tree.name + "'");
+        // System.out.println("Entering method '" + tree.name + "'");
+
+        // if we're looking at an anonymous inner class method, it will have no symbol, so we need
+        // to magick one up to be the owner of this scope otherwise other things get unhappy
+        MethodSymbol msym = tree.sym;
+        if (msym == null) {
+            msym = new MethodSymbol(0, tree.name, null, _env.enclClass.sym);
+        }
 
         // create a local environment for this method definition
         Env<ImferContext> oenv = _env;
         _env = _env.dup(tree, oenv.info.dup(oenv.info.scope.dupUnshared()));
         _env.enclMethod = tree;
-        _env.info.scope.owner = tree.sym;
+        _env.info.scope.owner = msym;
 
         // now we can call super and translate our children
         super.visitMethodDef(tree);
 
         // restore our previous environment
+        _env = oenv;
+    }
+
+    @Override public void visitBlock (JCBlock tree) {
+        // create a local environment for this block
+        Env<ImferContext> oenv = _env;
+        _env = _env.dup(tree, oenv.info.dup(oenv.info.scope.dupUnshared()));
+        super.visitBlock(tree);
         _env = oenv;
     }
 
@@ -181,8 +220,8 @@ public class Imfer extends TreeScanner
             sym.pos = tree.pos;
         }
 
-        // if we're inside a method, we need to enter all encountered symbols into scope
-        if (_env.enclMethod != null) {
+        // if we're seeing a non-class-member, we need to enter this symbol into our scope
+        if (!(sym.owner instanceof ClassSymbol)) {
             _env.info.scope.enter(sym);
         }
 
@@ -192,15 +231,13 @@ public class Imfer extends TreeScanner
         // if this is a public or protected class member, we need to mark it mutable (unless it's
         // already marked final) because we can't know determine if it's ever mutated
         if (isNonPrivateMember(sym) && (sym.flags() & Flags.FINAL) == 0) {
-            System.out.println("Need to make non-private member mutable " + sym);
+            // System.out.println("Need to make non-private member mutable " + sym);
             _env.info.mutable.add(sym);
         }
     }
 
     @Override public void visitUnary (JCUnary tree) {
         super.visitUnary(tree);
-
-        System.out.println("Look ma, unop " + tree);
 
         // ++ and friends mutate
         if (UNOPS.contains(tree.tag) /* getTag() in 1.7 */ ) {
@@ -211,16 +248,12 @@ public class Imfer extends TreeScanner
     @Override public void visitAssignop (JCAssignOp tree) {
         super.visitAssignop(tree);
 
-        System.out.println("Look ma, assignop " + tree);
-
         // op= mutates its lhs
         noteMutable(tree.lhs);
     }
 
     @Override public void visitAssign (JCAssign tree) {
         super.visitAssign(tree);
-
-        System.out.println("Look ma, assign " + tree);
 
         // = mutates its lhs
         noteMutable(tree.lhs);
@@ -229,6 +262,7 @@ public class Imfer extends TreeScanner
     protected Imfer (Context ctx)
     {
         ctx.put(IMFER_KEY, this);
+        _names = Name.Table.instance(ctx);
     }
 
     protected void noteMutable (JCExpression tree)
@@ -242,7 +276,7 @@ public class Imfer extends TreeScanner
             } else if (isNonPrivateMember(vsym)) {
                 System.err.println("Can't do anything with non-private member. " + tree);
             } else {
-                System.err.println("Mark this var as mutable! " + tree);
+                // System.err.println("Mark this var as mutable! " + tree);
                 _env.info.mutable.add(vsym);
             }
         }
@@ -271,8 +305,7 @@ public class Imfer extends TreeScanner
      */
     protected boolean isNonPrivateMember (Symbol vsym)
     {
-        return (vsym.owner instanceof ClassSymbol &&
-                (vsym.flags() & (Flags.PUBLIC|Flags.PROTECTED)) != 0);
+        return (vsym.owner instanceof ClassSymbol && (vsym.flags() & Flags.PRIVATE) == 0);
     }
 
     protected Symbol findVar (Name name)
@@ -289,6 +322,7 @@ public class Imfer extends TreeScanner
     protected static Symbol lookup (Scope scope, Name name, int kind)
     {
         for ( ; scope != Scope.emptyScope && scope != null; scope = scope.next) {
+            // System.err.println("Looking for " + name + " in " + scope);
             Symbol sym = first(scope.lookup(name), kind);
             if (sym != null) {
                 return sym;
@@ -305,6 +339,11 @@ public class Imfer extends TreeScanner
             }
         }
         return null;
+    }
+
+    protected static Symbol getOwner (Env<?> env)
+    {
+        return (env.enclMethod != null) ? env.enclMethod.sym : env.enclClass.sym;
     }
 
     protected static boolean haveVarAnnotation (List<JCAnnotation> anns)
@@ -342,6 +381,7 @@ public class Imfer extends TreeScanner
     }
 
     protected Env<ImferContext> _env;
+    protected Name.Table _names; // annoyingly this is Names in 1.7
 
     /** The set of all mutating unary operators. */
     protected static final Set<Integer> UNOPS = new HashSet<Integer>();
