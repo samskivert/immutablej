@@ -123,6 +123,10 @@ public class Imfer extends TreeScanner
                 ioe.printStackTrace(System.err);
             }
 
+            if (varsAdded > 0) {
+                System.out.println("Added " + varsAdded + " @var annotations in " + file.getName());
+            }
+
         } finally {
             _env = oenv;
         }
