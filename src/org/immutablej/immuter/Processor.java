@@ -75,7 +75,7 @@ public class Processor extends AbstractProcessor
                 continue;
             }
 
-            System.err.println("Processing " + unit.sourcefile);
+            // System.err.println("Processing " + unit.sourcefile);
             unit.accept(new TreeTranslator() {
                 public void visitVarDef (JCVariableDecl tree) {
                     super.visitVarDef(tree);
