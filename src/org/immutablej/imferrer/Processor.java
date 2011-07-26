@@ -58,7 +58,10 @@ public class Processor extends AbstractProcessor
             return false;
         }
         for (Element elem : roundEnv.getRootElements()) {
-            _imfer.imfer(toUnit(elem));
+            JCCompilationUnit unit = toUnit(elem);
+            if (unit != null) { // unit will be null if we're called on package-info.java files
+                _imfer.imfer(unit);
+            }
         }
         return true; // we won't be run in conjunction with other annotation processors so we can
                      // safely claim to have handled everything
