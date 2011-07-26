@@ -54,8 +54,8 @@ public class Processor extends AbstractProcessor
         // note our options
         _handleStar = "true".equalsIgnoreCase(procenv.getOptions().get(HANDLE_STAR));
 
-        procenv.getMessager().printMessage(
-            Diagnostic.Kind.NOTE, "Immuter running [vers=" + procenv.getSourceVersion() + "]");
+//         procenv.getMessager().printMessage(
+//             Diagnostic.Kind.NOTE, "Immuter running [src=" + procenv.getSourceVersion() + "]");
     }
 
     @Override // from AbstractProcessor
@@ -67,6 +67,9 @@ public class Processor extends AbstractProcessor
 
         for (Element elem : roundEnv.getRootElements()) {
             final JCCompilationUnit unit = toUnit(elem);
+            if (unit == null) {
+                continue;
+            }
 
             // we only want to operate on files being compiled from source; if they're already
             // classfiles then we've already run or we're looking at a library class
